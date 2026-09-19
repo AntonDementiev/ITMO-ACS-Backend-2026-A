@@ -22,6 +22,7 @@ import ApplicationController from './controllers/application.controller';
 import FavoriteController from './controllers/favorite.controller';
 import RecommendationController from './controllers/recommendation.controller';
 import HealthController from './controllers/health.controller';
+import DevController from './controllers/dev.controller';
 
 class App {
     public port: number;
@@ -68,6 +69,8 @@ class App {
                 FavoriteController,
                 RecommendationController,
                 HealthController,
+                // тестовый «почтовый ящик»: только при MAIL_DEBUG=true
+                ...(SETTINGS.MAIL_DEBUG ? [DevController] : []),
             ],
             validation: { whitelist: true },
             classTransformer: true,
@@ -91,6 +94,9 @@ class App {
             await dataSource.initialize();
             console.log('Data Source has been initialized!');
             if (SETTINGS.SEED_ON_START) await seedReferenceData();
+            if (SETTINGS.MAIL_DEBUG) {
+                console.warn('MAIL_DEBUG включён: доступен GET /dev/mailbox. Используйте только для тестов!');
+            }
         } catch (err) {
             console.error('Error during Data Source initialization:', err);
         }

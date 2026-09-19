@@ -35,6 +35,9 @@ class Settings {
     RATE_LIMIT_WINDOW_SECONDS: number =
         parseInt(env.RATE_LIMIT_WINDOW_SECONDS) || 60;
 
+    // ТОЛЬКО ДЛЯ ТЕСТОВ: включает GET /dev/mailbox с кодами из писем (для Postman)
+    MAIL_DEBUG: boolean = env.MAIL_DEBUG === 'true';
+
     // заполнить справочники (отрасли, навыки) при первом запуске
     SEED_ON_START: boolean = env.SEED_ON_START !== 'false';
 }
