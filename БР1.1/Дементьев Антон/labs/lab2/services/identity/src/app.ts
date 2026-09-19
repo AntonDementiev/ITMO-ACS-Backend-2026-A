@@ -22,6 +22,6 @@ startService({
     publicInternal: ['/auth/service-token', '/.well-known/jwks.json'],
     onReady: async () => {
         await seedClients();
-        startOutboxDispatcher(dataSource, { 'identity.email_requested': ['notification-service'] });
+        startOutboxDispatcher(dataSource);
     },
 });

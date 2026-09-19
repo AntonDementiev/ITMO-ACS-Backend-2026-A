@@ -9,5 +9,5 @@ import InternalController from './controllers/internal.controller';
 startService({
     name: 'vacancy-service', port: parseInt(process.env.PORT || '8003'), dataSource, jwks,
     controllers: [CompanyController, VacancyController, FavoriteController, InternalController],
-    onReady: async () => { startOutboxDispatcher(dataSource, { 'vacancy.upserted': ['recommendation-service'], 'vacancy.deleted': ['recommendation-service'] }); },
+    onReady: async () => { startOutboxDispatcher(dataSource); },
 });

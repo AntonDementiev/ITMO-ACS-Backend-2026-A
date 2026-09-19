@@ -16,6 +16,8 @@
 
 Все базы находятся в одном контейнере PostgreSQL, но это 7 отдельных БД с отдельными пользователями (`postgres/init.sql`): сервис видит только свою базу.
 
+Межсервисные события (ДЗ 5) идут через RabbitMQ (`rabbitmq:3-management`, топик-обмен `jobsearch.events`); management UI — http://localhost:15672 (jobsearch/jobsearch).
+
 ## Запуск
 
 Сначала остановить ЛР 1, если она запущена (занят порт 15432): в папке `lab1` выполнить `docker compose down`.
@@ -23,7 +25,7 @@
 ```bash
 cd lab2
 docker compose up -d --build
-docker compose ps            # 9 контейнеров в статусе Up
+docker compose ps            # 10 контейнеров в статусе Up (7 сервисов + gateway + postgres + rabbitmq)
 ```
 
 Первая сборка занимает несколько минут. Проверка:
@@ -38,20 +40,32 @@ docker compose ps            # 9 контейнеров в статусе Up
 
 ## Как устроено
 
-- **Общая библиотека** `packages/common`: ошибки, проверка JWT по JWKS, клиент межсервисных вызовов (сервисный токен, тайм-аут 2 с, повторы для GET, circuit breaker), outbox/inbox, запуск сервиса.
+- **Общая библиотека** `packages/common`: ошибки, проверка JWT по JWKS, клиент межсервисных вызовов (сервисный токен, тайм-аут 2 с, повторы для GET, circuit breaker), outbox/inbox, клиент RabbitMQ (`mq.ts`), запуск сервиса.
 - **Токены.** Identity подписывает JWT ключом RS256 (ключ хранится в томе `identity-keys`), остальные проверяют подпись по `GET /internal/v1/.well-known/jwks.json`. Для вызовов между сервисами выдаются сервисные токены (`POST /internal/v1/auth/service-token`, 5 минут, привязаны к сервису-получателю).
-- **Внутреннее API** `/internal/v1/**` доступно только с сервисным токеном и не маршрутизируется шлюзом (описано в ДЗ 4, `openapi-internal.yaml`).
+- **Внутреннее API** `/internal/v1/**` доступно только с сервисным токеном и не маршрутизируется шлюзом (описано в ДЗ 4, `openapi-internal.yaml`); синхронные проверки между сервисами (`applications/exists`, `access-check` и т.п.) по-прежнему выполняются через него.
 - **Целостность без внешних ключей между БД.** Удаление вакансии: сначала закрыть, затем спросить Application Service (`applications/exists`), затем удалить; удаление резюме проверяется так же; Application раз в час сверяет отклики с существующими вакансиями и резюме.
-- **События** (`identity.email_requested`, `vacancy.*`, `resume.*`) пишутся в таблицу `outbox_events` в одной транзакции с изменением данных и доставляются получателям с повторами; получатели идемпотентны (`inbox_events`). Сейчас доставка идёт по HTTP (`POST /internal/v1/events`); замена на RabbitMQ запланирована в следующем ДЗ, обработчики событий при этом не меняются.
-- **Деградация.** Recommendation и Notification можно остановить: остальные функции работают, события накапливаются и доставляются после запуска. Справочники кешируются на 10 минут (`packages/common/src/refs.ts`).
+- **События** (`identity.email_requested`, `vacancy.upserted/deleted`, `resume.upserted/deleted`) пишутся в таблицу `outbox_events` в одной транзакции с изменением данных, отдельный диспетчер (`startOutboxDispatcher`) публикует их в RabbitMQ, топик-обмен `jobsearch.events` (routing key = тип события). Получатели — durable-очереди, привязанные к нужным routing key (`notification.identity-events`, `recommendation.catalog-events`); обработка идемпотентна (`inbox_events`, `processOnce`), при ошибке обработчика событие переотправляется в очередь (до 5 попыток), затем уходит в dead-letter очередь (`<очередь>.dead`) для ручного разбора. Подробности — в разделе «ДЗ 5» ниже.
+- **Деградация.** Recommendation и Notification можно остановить: остальные функции работают, события копятся в outbox и в очередях RabbitMQ и доставляются после запуска. Справочники кешируются на 10 минут (`packages/common/src/refs.ts`).
 - Индекс Recommendation заполняется автоматически при первом запуске и может быть перестроен `POST /internal/v1/index/rebuild`.
+
+## ДЗ 5. RabbitMQ
+
+Межсервисное взаимодействие по событиям переведено с HTTP (`POST /internal/v1/events`) на RabbitMQ:
+
+- Брокер — контейнер `rabbitmq:3-management` (AMQP :5672, management UI :15672, `jobsearch`/`jobsearch`).
+- Обмен `jobsearch.events` (topic, durable). Издатель публикует событие с routing key, равным его типу (например `vacancy.upserted`).
+- Publisher — тот же диспетчер outbox, что и раньше (`packages/common/src/outbox.ts`), только вместо HTTP-вызова получателя вызывает `publishEnvelope()` (`packages/common/src/mq.ts`).
+- Consumer — `startEventConsumer()` в `packages/common/src/mq.ts`: сервис объявляет свою durable-очередь, привязывает её к нужным routing key на обмене `jobsearch.events`, читает с `prefetch=10` и ручным ack. Используют его `services/notification/src/consumer.ts` (очередь `notification.identity-events` ← `identity.email_requested`) и `services/recommendation/src/consumer.ts` (очередь `recommendation.catalog-events` ← `vacancy.*`, `resume.*`).
+- Надёжность: подключение к брокеру переустанавливается с повтором (как и подключение к БД при старте); неподтверждённое сообщение при падении сервиса остаётся в очереди и будет доставлено снова; при ошибке обработчика — до 5 попыток (счётчик в заголовке `x-attempt`), затем dead-letter очередь `<имя>.dead` через fanout-обмен `<имя>.dlx`.
+- Идемпотентность обработчиков не изменилась: `processOnce()` по-прежнему пишет `event_id` в `inbox_events` в той же транзакции, что и результат обработки, поэтому повторная доставка (retry, redelivery после падения) не приводит к повторному эффекту.
+- HTTP-эндпоинты `POST /internal/v1/events` в notification-service и recommendation-service удалены — их роль полностью выполняют RabbitMQ-consumer'ы.
 
 ## Отличия от ДЗ 4
 
 - Схема БД создаётся автоматически TypeORM (`synchronize`), миграции не подключены.
 - Счётчики лимита запросов хранятся в памяти шлюза, без Redis.
-- События идут по HTTP, RabbitMQ будет в следующем ДЗ.
+- События идут через RabbitMQ (см. «ДЗ 5» выше), а не по HTTP.
 
 ## Запуск без Docker (для отладки)
 
-Нужны PostgreSQL с базами из `postgres/init.sql`, Node 22 и `npm install`. Каждый сервис запускается командой `npx tsx services/<имя>/src/app.ts` с переменными окружения из `docker-compose.yml` (для запуска на одном хосте задать `URL_IDENTITY=http://localhost:8001` и аналогичные `URL_*`).
+Нужны PostgreSQL с базами из `postgres/init.sql`, RabbitMQ (например `docker run -d -p 5672:5672 -p 15672:15672 rabbitmq:3-management`) и `RABBITMQ_URL=amqp://guest:guest@localhost:5672`, Node 22 и `npm install`. Каждый сервис запускается командой `npx tsx services/<имя>/src/app.ts` с переменными окружения из `docker-compose.yml` (для запуска на одном хосте задать `URL_IDENTITY=http://localhost:8001` и аналогичные `URL_*`).

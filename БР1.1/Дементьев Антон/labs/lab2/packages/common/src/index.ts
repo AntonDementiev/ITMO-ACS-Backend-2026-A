@@ -8,6 +8,7 @@ export * from './middlewares';
 export * from './auth';
 export * from './client';
 export * from './outbox';
+export * from './mq';
 export * from './bootstrap';
 export * from './validators';
 export * from './pagination';

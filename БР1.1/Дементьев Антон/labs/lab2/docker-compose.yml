@@ -1,10 +1,12 @@
 # ЛР 2: микросервисы сайта поиска работы.
-# Один образ (jobsearch-services) запускается 8 раз с разными командами; наружу открыт только шлюз (8080) и Postgres (15432).
+# Один образ (jobsearch-services) запускается 8 раз с разными командами;
+# наружу открыт шлюз (8080), Postgres (15432) и RabbitMQ management UI (15672, ДЗ5).
 x-common-env: &common-env
   MAIL_DEBUG: "true"            # тестовый ящик писем GET /api/v1/dev/mailbox (для Postman); на продакшене выключить
   SERVICE_CLIENTS: "api-gateway:secret-api-gateway-0123456789,identity-service:secret-identity-service-0123456789,reference-service:secret-reference-service-0123456789,vacancy-service:secret-vacancy-service-0123456789,resume-service:secret-resume-service-0123456789,application-service:secret-application-service-0123456789,recommendation-service:secret-recommendation-service-0123456789,notification-service:secret-notification-service-0123456789,ops-tools:secret-ops-tools-0123456789"
   DB_HOST: postgres
   DB_PORT: "5432"
+  RABBITMQ_URL: "amqp://jobsearch:jobsearch@rabbitmq:5672"   # ДЗ5: межсервисные события publisher/consumer сервисы читают отсюда
 
 x-service: &service
   image: jobsearch-services
@@ -12,6 +14,8 @@ x-service: &service
   restart: unless-stopped
   depends_on:
     postgres:
+      condition: service_healthy
+    rabbitmq:
       condition: service_healthy
 
 services:
@@ -31,6 +35,24 @@ services:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 3s
       timeout: 3s
+      retries: 20
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: jobsearch-rabbitmq
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: jobsearch
+      RABBITMQ_DEFAULT_PASS: jobsearch
+    ports:
+      - "5672:5672"     # AMQP
+      - "15672:15672"   # management UI (http://localhost:15672, jobsearch/jobsearch)
+    volumes:
+      - ./dbs/rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
       retries: 20
 
   api-gateway:

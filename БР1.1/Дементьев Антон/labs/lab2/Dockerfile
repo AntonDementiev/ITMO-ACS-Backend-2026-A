@@ -11,5 +11,6 @@ COPY services/resume/package.json services/resume/
 COPY services/application/package.json services/application/
 COPY services/recommendation/package.json services/recommendation/
 COPY services/notification/package.json services/notification/
-RUN npm ci
+# amqplib добавлен в package.json (ДЗ5); npm install актуализирует package-lock.json при сборке
+RUN npm install
 COPY . .

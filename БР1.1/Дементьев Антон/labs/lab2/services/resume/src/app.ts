@@ -7,5 +7,5 @@ import InternalController from './controllers/internal.controller';
 startService({
     name: 'resume-service', port: parseInt(process.env.PORT || '8004'), dataSource, jwks,
     controllers: [ResumeController, InternalController],
-    onReady: async () => { startOutboxDispatcher(dataSource, { 'resume.upserted': ['recommendation-service'], 'resume.deleted': ['recommendation-service'] }); },
+    onReady: async () => { startOutboxDispatcher(dataSource); },
 });

@@ -1,11 +1,11 @@
 import { randomUUID } from 'crypto';
 import { BaseEntity, Column, CreateDateColumn, DataSource, Entity, EntityManager, PrimaryColumn } from 'typeorm';
 
-import { getClient, ServiceName } from './client';
 import { isUniqueViolation } from './validators';
+import { publishEnvelope } from './mq';
 
 // Таблица outbox: событие пишется в той же транзакции, что и изменение данных,
-// а отдельный процесс доставляет его получателям (сейчас по HTTP, в следующем ДЗ через RabbitMQ).
+// а отдельный процесс публикует его в RabbitMQ (обмен jobsearch.events, routing key = тип события).
 @Entity('outbox_events')
 export class OutboxEvent extends BaseEntity {
     @PrimaryColumn({ type: 'uuid' }) id: string;
@@ -33,8 +33,10 @@ export const publishEvent = async (manager: EntityManager, type: string, payload
 let dispatcher: { run: () => Promise<void> } | undefined;
 export const dispatchSoon = () => { if (dispatcher) setImmediate(() => dispatcher!.run().catch(() => undefined)); };
 
-// routes: тип события -> сервисы-получатели
-export function startOutboxDispatcher(ds: DataSource, routes: Record<string, ServiceName[]>, intervalMs = 2000) {
+// Публикует накопленные события в RabbitMQ (обмен jobsearch.events, topic-роутинг по типу события).
+// Получатели сами решают, какие routing key их интересуют (см. startEventConsumer в mq.ts) —
+// издателю не нужно знать список подписчиков, в отличие от прежней HTTP-версии.
+export function startOutboxDispatcher(ds: DataSource, intervalMs = 2000) {
     let busy = false;
     const run = async () => {
         if (busy) return;
@@ -46,12 +48,12 @@ export function startOutboxDispatcher(ds: DataSource, routes: Record<string, Ser
             for (const e of list) {
                 const env: EventEnvelope = { event_id: e.id, type: e.type, version: 1, occurred_at: e.createdAt.toISOString(), payload: e.payload };
                 try {
-                    for (const target of routes[e.type] || []) await getClient().call(target, 'POST', '/internal/v1/events', { body: env, idempotent: true });
+                    await publishEnvelope(e.type, env);
                     await repo.update(e.id, { publishedAt: new Date() });
                 } catch (err: any) {
                     const attempts = e.attempts + 1;
                     await repo.update(e.id, { attempts, nextAttemptAt: new Date(Date.now() + Math.min(2 ** attempts, 60) * 1000) });
-                    console.warn(`Событие ${e.type} (${e.id}) не доставлено, попытка ${attempts}: ${err?.code || err?.message}`);
+                    console.warn(`Событие ${e.type} (${e.id}) не опубликовано в RabbitMQ, попытка ${attempts}: ${err?.code || err?.message}`);
                 }
             }
         } finally { busy = false; }
